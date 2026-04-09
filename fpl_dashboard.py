@@ -250,6 +250,56 @@ def get_fixture_density(gw_start, end_gw=38):
         
     return report
 
+def adjust_targets_for_schedule(targets_df, gw_start, lookahead=4):
+    """Dynamically boosts/penalizes player ratings based on DGWs and BGWs."""
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    fix_res = requests.get('https://fantasy.premierleague.com/api/fixtures/', headers=headers)
+    teams_res = requests.get('https://fantasy.premierleague.com/api/bootstrap-static/', headers=headers)
+    
+    if fix_res.status_code != 200 or teams_res.status_code != 200: 
+        return targets_df
+        
+    fixtures = fix_res.json()
+    teams_data = teams_res.json()['teams']
+    
+    # Map Team IDs to Names to match your DataFrame
+    team_mapping = {t['id']: {'name': t['name'], 'short': t['short_name']} for t in teams_data}
+    
+    gw_end = gw_start + lookahead - 1
+    relevant_fixtures = [f for f in fixtures if f['event'] and gw_start <= f['event'] <= gw_end]
+    
+    # Count how many fixtures each team actually has in this window
+    fixture_counts = {t_id: 0 for t_id in team_mapping.keys()}
+    for f in relevant_fixtures:
+        fixture_counts[f['team_h']] += 1
+        fixture_counts[f['team_a']] += 1
+        
+    # Calculate the Multiplier 
+    name_bonuses = {}
+    for t_id, count in fixture_counts.items():
+        expected_games = lookahead
+        # Base multiplier based on sheer volume of games
+        multiplier = count / expected_games if expected_games > 0 else 1.0
+        
+        # Aggressive modifiers: Extra punishment for blanks, extra reward for doubles
+        if count > expected_games: multiplier += 0.15 
+        if count < expected_games: multiplier -= 0.25 
+        
+        # Store for mapping
+        name_bonuses[team_mapping[t_id]['name']] = multiplier
+        name_bonuses[team_mapping[t_id]['short']] = multiplier # Fallback just in case
+        
+    adj_targets = targets_df.copy()
+    
+    # Find the team column in your targets_df and apply the multiplier
+    team_col = 'name' if 'name' in adj_targets.columns else ('team' if 'team' in adj_targets.columns else None)
+    
+    if team_col and adj_targets[team_col].iloc[0] in name_bonuses:
+        adj_targets['fixture_multiplier'] = adj_targets[team_col].map(name_bonuses).fillna(1.0)
+        adj_targets['buy_rating'] = adj_targets['buy_rating'] * adj_targets['fixture_multiplier']
+        
+    return adj_targets
+
 def suggest_chip_strategy(density_report, available_chips):
     """Generates a comprehensive, mapped roadmap for the remaining chips."""
     suggestions = []
@@ -692,6 +742,14 @@ if players_df is not None:
     # NEW TABS SETUP
     tab1, tab5, tab2, tab3, tab4 = st.tabs(["📊 My Team Analysis", "📅 Fixtures & Chips", "🎯 Master Target List", "🃏 Smart Wildcard", "🔥 1-Week Free Hit"])
     
+    # if "my_team" not in st.session_state:
+    #     st.session_state.my_team = None
+    #     st.session_state.bank = 0.0
+    #     st.session_state.sale_value = 100.0
+    #     st.session_state.total_value = 100.0
+    #     st.session_state.available_chips = []
+    #     st.session_state.gw = 1
+
     if "my_team" not in st.session_state:
         st.session_state.my_team = None
         st.session_state.bank = 0.0
@@ -699,11 +757,44 @@ if players_df is not None:
         st.session_state.total_value = 100.0
         st.session_state.available_chips = []
         st.session_state.gw = 1
+        st.session_state.smart_targets_df = targets_df # <--- ADD THIS LINE
+
+    # if analyze_button and manager_id_input.isdigit():
+    #     manager_id = int(manager_id_input)
+    #     gw = get_current_gameweek(gw_df)
+    #     st.session_state.gw = gw
+        
+    #     manager_data = fetch_manager_data(manager_id, gw)
+    #     st.session_state.available_chips = get_available_chips(manager_id)
+        
+    #     if manager_data:
+    #         my_team_raw = manager_data["team"]
+    #         st.session_state.bank = manager_data["bank"]
+            
+    #         # --- THE FINANCIAL MERGE ---
+    #         squad_ids = my_team_raw['element'].tolist()
+    #         financials = get_player_financials(manager_id, squad_ids)
+            
+    #         my_team_raw['purchase_price'] = my_team_raw['element'].map(lambda x: financials[x]['purchase_price'])
+    #         my_team_raw['selling_price'] = my_team_raw['element'].map(lambda x: financials[x]['selling_price'])
+    #         my_team_raw['profit'] = my_team_raw['element'].map(lambda x: financials[x]['profit'])
+            
+    #         my_team_temp = my_team_raw.merge(players_df[['id', 'web_name', 'now_cost', 'element_type', 'ep_next']], left_on='element', right_on='id')
+    #         my_team_temp = my_team_temp.merge(targets_df[['web_name', 'buy_rating', 'next_3_fdr']], on='web_name', how='left')
+    #         my_team_temp['buy_rating'] = my_team_temp['buy_rating'].fillna(0.0)
+            
+    #         st.session_state.total_value = round(my_team_temp['now_cost'].sum() + st.session_state.bank, 1)
+    #         st.session_state.sale_value = round(my_team_temp['selling_price'].sum() + st.session_state.bank, 1)
+    #         st.session_state.my_team = my_team_temp
 
     if analyze_button and manager_id_input.isdigit():
         manager_id = int(manager_id_input)
         gw = get_current_gameweek(gw_df)
         st.session_state.gw = gw
+        
+        # 🌟 TRIGGER THE FIXTURE ENGINE 🌟
+        smart_targets_df = adjust_targets_for_schedule(targets_df, gw, lookahead=4)
+        st.session_state.smart_targets_df = smart_targets_df
         
         manager_data = fetch_manager_data(manager_id, gw)
         st.session_state.available_chips = get_available_chips(manager_id)
@@ -712,16 +803,18 @@ if players_df is not None:
             my_team_raw = manager_data["team"]
             st.session_state.bank = manager_data["bank"]
             
-            # --- THE FINANCIAL MERGE ---
             squad_ids = my_team_raw['element'].tolist()
             financials = get_player_financials(manager_id, squad_ids)
             
             my_team_raw['purchase_price'] = my_team_raw['element'].map(lambda x: financials[x]['purchase_price'])
             my_team_raw['selling_price'] = my_team_raw['element'].map(lambda x: financials[x]['selling_price'])
-            my_team_raw['profit'] = my_team_raw['element'].map(lambda x: financials[x]['profit'])
+            my_team_raw['profit'] = my_my_team_raw['element'].map(lambda x: financials[x]['profit'])
             
             my_team_temp = my_team_raw.merge(players_df[['id', 'web_name', 'now_cost', 'element_type', 'ep_next']], left_on='element', right_on='id')
-            my_team_temp = my_team_temp.merge(targets_df[['web_name', 'buy_rating', 'next_3_fdr']], on='web_name', how='left')
+            
+            # 🌟 MERGE THE SMART RATINGS WITH YOUR SQUAD 🌟
+            # Now, if your player has a blank, their rating drops instantly!
+            my_team_temp = my_team_temp.merge(smart_targets_df[['web_name', 'buy_rating', 'next_3_fdr']], on='web_name', how='left')
             my_team_temp['buy_rating'] = my_team_temp['buy_rating'].fillna(0.0)
             
             st.session_state.total_value = round(my_team_temp['now_cost'].sum() + st.session_state.bank, 1)
@@ -777,11 +870,18 @@ if players_df is not None:
                     is_emergency = weakest_link['ep_next'] <= 0
                     sell_reason = "Emergency (Blank/Injured)" if is_emergency else "Lowest Squad Rating"
                     
-                    affordable_targets = targets_df[
-                        (~targets_df['web_name'].isin(owned_names)) & 
-                        (targets_df['element_type'] == weakest_link['element_type_x']) &
-                        (targets_df['now_cost'] <= available_funds) &
-                        (targets_df['ep_next'].astype(float) > 0.5) 
+                    # affordable_targets = targets_df[
+                    #     (~targets_df['web_name'].isin(owned_names)) & 
+                    #     (targets_df['element_type'] == weakest_link['element_type_x']) &
+                    #     (targets_df['now_cost'] <= available_funds) &
+                    #     (targets_df['ep_next'].astype(float) > 0.5) 
+                    # ].sort_values('buy_rating', ascending=False)
+
+                    affordable_targets = st.session_state.smart_targets_df[
+                        (~st.session_state.smart_targets_df['web_name'].isin(owned_names)) & 
+                        (st.session_state.smart_targets_df['element_type'] == weakest_link['element_type_x']) &
+                        (st.session_state.smart_targets_df['now_cost'] <= available_funds) &
+                        (st.session_state.smart_targets_df['ep_next'].astype(float) > 0.5) 
                     ].sort_values('buy_rating', ascending=False)
                     
                     if not affordable_targets.empty:
@@ -921,9 +1021,16 @@ if players_df is not None:
         st.header("🃏 Smart Wildcard Generator")
         selected_budget = st.slider("Set Wildcard Budget (£m)", min_value=90.0, max_value=110.0, value=float(sale_value), step=0.1)
         
+        # if st.button("Generate Wildcard Squad"):
+        #     with st.spinner("Crunching the numbers..."):
+        #         clean_targets = targets_df.dropna(subset=['now_cost', 'buy_rating']).copy()
+        #         clean_targets = clean_targets[clean_targets['ep_next'].astype(float) > 0.5]
+                
+        #         wc_team = generate_wildcard(clean_targets, selected_budget)
         if st.button("Generate Wildcard Squad"):
-            with st.spinner("Crunching the numbers..."):
-                clean_targets = targets_df.dropna(subset=['now_cost', 'buy_rating']).copy()
+            with st.spinner("Crunching fixture-aware numbers..."):
+                # USE SMART TARGETS FOR THE WILDCARD
+                clean_targets = st.session_state.smart_targets_df.dropna(subset=['now_cost', 'buy_rating']).copy()
                 clean_targets = clean_targets[clean_targets['ep_next'].astype(float) > 0.5]
                 
                 wc_team = generate_wildcard(clean_targets, selected_budget)
