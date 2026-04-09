@@ -121,6 +121,84 @@ def get_player_financials(manager_id, current_squad_ids):
         
     return financials
 
+# def get_available_chips(manager_id):
+#     """Checks the FPL API for chips the manager has already used."""
+#     headers = {'User-Agent': 'Mozilla/5.0'}
+#     res = requests.get(f'https://fantasy.premierleague.com/api/entry/{manager_id}/history/', headers=headers)
+#     if res.status_code != 200: 
+#         return []
+        
+#     history = res.json()
+#     used_chips = [chip['name'] for chip in history.get('chips', [])]
+    
+#     available = []
+#     if 'bboost' not in used_chips: available.append('Bench Boost')
+#     if '3xc' not in used_chips: available.append('Triple Captain')
+#     if 'freehit' not in used_chips: available.append('Free Hit')
+    
+#     # FPL managers get 2 wildcards a season
+#     wc_used = used_chips.count('wildcard')
+#     if wc_used == 0: available.append('Wildcard (x2)')
+#     elif wc_used == 1: available.append('Wildcard (x1)')
+    
+#     return available
+
+# def get_fixture_density(gw_start, lookahead=4):
+#     """Scans the FPL schedule to find Blank and Double Gameweeks."""
+#     headers = {'User-Agent': 'Mozilla/5.0'}
+#     fix_res = requests.get('https://fantasy.premierleague.com/api/fixtures/', headers=headers)
+#     teams_res = requests.get('https://fantasy.premierleague.com/api/bootstrap-static/', headers=headers)
+    
+#     if fix_res.status_code != 200 or teams_res.status_code != 200: 
+#         return []
+        
+#     fixtures = fix_res.json()
+#     teams = {t['id']: t['short_name'] for t in teams_res.json()['teams']}
+    
+#     gw_end = gw_start + lookahead - 1
+#     relevant_fixtures = [f for f in fixtures if f['event'] and gw_start <= f['event'] <= gw_end]
+    
+#     density = {gw: {team_id: 0 for team_id in teams.keys()} for gw in range(gw_start, gw_end + 1)}
+    
+#     for f in relevant_fixtures:
+#         if f['team_h'] in density[f['event']]: density[f['event']][f['team_h']] += 1
+#         if f['team_a'] in density[f['event']]: density[f['event']][f['team_a']] += 1
+        
+#     report = []
+#     for gw in range(gw_start, gw_end + 1):
+#         bgw_teams = [teams[t] for t, count in density[gw].items() if count == 0]
+#         dgw_teams = [teams[t] for t, count in density[gw].items() if count > 1]
+#         report.append({"GW": gw, "Blanks": bgw_teams, "Doubles": dgw_teams})
+        
+#     return report
+
+# def suggest_chip_strategy(density_report, available_chips):
+#     """Generates chip advice based on upcoming fixture congestion."""
+#     suggestions = []
+#     for gw_data in density_report:
+#         gw = gw_data['GW']
+#         blanks = gw_data['Blanks']
+#         doubles = gw_data['Doubles']
+        
+#         if len(blanks) >= 4 and 'Free Hit' in available_chips:
+#             suggestions.append(f"⚠️ **GW{gw} Alert:** {len(blanks)} teams are blanking ({', '.join(blanks[:4])}...). Highly consider using your **Free Hit** here.")
+#         elif len(blanks) > 0:
+#             suggestions.append(f"ℹ️ **GW{gw} Minor Blank:** Watch out, {', '.join(blanks)} do not play.")
+        
+#         if len(doubles) >= 3:
+#             if 'Bench Boost' in available_chips:
+#                 suggestions.append(f"🔥 **GW{gw} Massive Double:** {len(doubles)} teams play twice! Perfect time for a **Bench Boost**.")
+#             if 'Triple Captain' in available_chips:
+#                 suggestions.append(f"👑 **GW{gw} Double Gameweek Alert:** Consider using **Triple Captain** on a premium player from {', '.join(doubles[:3])}.")
+#         elif len(doubles) > 0:
+#             if 'Triple Captain' in available_chips:
+#                 suggestions.append(f"🎯 **GW{gw} Double:** {', '.join(doubles)} play twice. Could be a cheeky **Triple Captain** opportunity.")
+                
+#     if not suggestions:
+#         suggestions.append("🧘 **Patience:** Keep your chips for now. No obvious major DGW/BGW chip strategies in the immediate horizon.")
+        
+#     return suggestions
+
 def get_available_chips(manager_id):
     """Checks the FPL API for chips the manager has already used."""
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -129,7 +207,8 @@ def get_available_chips(manager_id):
         return []
         
     history = res.json()
-    used_chips = [chip['name'] for chip in history.get('chips', [])]
+    # FIX: Force lowercase to ensure 'bboost' is always caught correctly regardless of API changes
+    used_chips = [chip['name'].lower() for chip in history.get('chips', [])]
     
     available = []
     if 'bboost' not in used_chips: available.append('Bench Boost')
@@ -143,8 +222,8 @@ def get_available_chips(manager_id):
     
     return available
 
-def get_fixture_density(gw_start, lookahead=4):
-    """Scans the FPL schedule to find Blank and Double Gameweeks."""
+def get_fixture_density(gw_start, end_gw=38):
+    """Scans the FPL schedule from the current GW to the end of the season."""
     headers = {'User-Agent': 'Mozilla/5.0'}
     fix_res = requests.get('https://fantasy.premierleague.com/api/fixtures/', headers=headers)
     teams_res = requests.get('https://fantasy.premierleague.com/api/bootstrap-static/', headers=headers)
@@ -155,17 +234,16 @@ def get_fixture_density(gw_start, lookahead=4):
     fixtures = fix_res.json()
     teams = {t['id']: t['short_name'] for t in teams_res.json()['teams']}
     
-    gw_end = gw_start + lookahead - 1
-    relevant_fixtures = [f for f in fixtures if f['event'] and gw_start <= f['event'] <= gw_end]
+    relevant_fixtures = [f for f in fixtures if f['event'] and gw_start <= f['event'] <= end_gw]
     
-    density = {gw: {team_id: 0 for team_id in teams.keys()} for gw in range(gw_start, gw_end + 1)}
+    density = {gw: {team_id: 0 for team_id in teams.keys()} for gw in range(gw_start, end_gw + 1)}
     
     for f in relevant_fixtures:
         if f['team_h'] in density[f['event']]: density[f['event']][f['team_h']] += 1
         if f['team_a'] in density[f['event']]: density[f['event']][f['team_a']] += 1
         
     report = []
-    for gw in range(gw_start, gw_end + 1):
+    for gw in range(gw_start, end_gw + 1):
         bgw_teams = [teams[t] for t, count in density[gw].items() if count == 0]
         dgw_teams = [teams[t] for t, count in density[gw].items() if count > 1]
         report.append({"GW": gw, "Blanks": bgw_teams, "Doubles": dgw_teams})
@@ -173,29 +251,66 @@ def get_fixture_density(gw_start, lookahead=4):
     return report
 
 def suggest_chip_strategy(density_report, available_chips):
-    """Generates chip advice based on upcoming fixture congestion."""
+    """Generates a comprehensive, mapped roadmap for the remaining chips."""
     suggestions = []
-    for gw_data in density_report:
-        gw = gw_data['GW']
-        blanks = gw_data['Blanks']
-        doubles = gw_data['Doubles']
-        
-        if len(blanks) >= 4 and 'Free Hit' in available_chips:
-            suggestions.append(f"⚠️ **GW{gw} Alert:** {len(blanks)} teams are blanking ({', '.join(blanks[:4])}...). Highly consider using your **Free Hit** here.")
-        elif len(blanks) > 0:
-            suggestions.append(f"ℹ️ **GW{gw} Minor Blank:** Watch out, {', '.join(blanks)} do not play.")
-        
-        if len(doubles) >= 3:
-            if 'Bench Boost' in available_chips:
-                suggestions.append(f"🔥 **GW{gw} Massive Double:** {len(doubles)} teams play twice! Perfect time for a **Bench Boost**.")
-            if 'Triple Captain' in available_chips:
-                suggestions.append(f"👑 **GW{gw} Double Gameweek Alert:** Consider using **Triple Captain** on a premium player from {', '.join(doubles[:3])}.")
-        elif len(doubles) > 0:
-            if 'Triple Captain' in available_chips:
-                suggestions.append(f"🎯 **GW{gw} Double:** {', '.join(doubles)} play twice. Could be a cheeky **Triple Captain** opportunity.")
+    
+    # Find all notable gameweeks
+    bgws = [gw for gw in density_report if len(gw['Blanks']) > 0]
+    dgws = [gw for gw in density_report if len(gw['Doubles']) > 0]
+    
+    # Sort by severity (biggest blanks/doubles first)
+    bgws.sort(key=lambda x: len(x['Blanks']), reverse=True)
+    dgws.sort(key=lambda x: len(x['Doubles']), reverse=True)
+    
+    planned_chips = {} # Track which GW we assigned a chip to avoid double-booking
+    
+    # 1. Map Free Hit to the biggest Blank Gameweek
+    if 'Free Hit' in available_chips and bgws:
+        biggest_bgw = bgws[0]
+        if len(biggest_bgw['Blanks']) >= 4:
+            planned_chips[biggest_bgw['GW']] = "Free Hit"
+            suggestions.append(f"🔴 **Free Hit Strategy:** Play this in **GW{biggest_bgw['GW']}**. With {len(biggest_bgw['Blanks'])} teams blanking ({', '.join(biggest_bgw['Blanks'][:4])}...), this chip saves you from taking massive point hits.")
+
+    # 2. Map Bench Boost to the biggest Double Gameweek
+    if 'Bench Boost' in available_chips and dgws:
+        for dgw in dgws:
+            if dgw['GW'] not in planned_chips:
+                planned_chips[dgw['GW']] = "Bench Boost"
+                suggestions.append(f"🔥 **Bench Boost Strategy:** Target **GW{dgw['GW']}** where {len(dgw['Doubles'])} teams play twice. This maximizes the 15-man squad potential.")
                 
-    if not suggestions:
-        suggestions.append("🧘 **Patience:** Keep your chips for now. No obvious major DGW/BGW chip strategies in the immediate horizon.")
+                # 3. Map Wildcard to set up the Bench Boost (if available)
+                wc_count = 2 if 'Wildcard (x2)' in available_chips else (1 if 'Wildcard (x1)' in available_chips else 0)
+                if wc_count > 0:
+                    target_wc_gw = dgw['GW'] - 1
+                    # Ensure we don't suggest wildcarding in the past
+                    if target_wc_gw >= density_report[0]['GW'] and target_wc_gw not in planned_chips:
+                        planned_chips[target_wc_gw] = "Wildcard"
+                        suggestions.append(f"🃏 **Wildcard Strategy:** Because you should Bench Boost in GW{dgw['GW']}, trigger your Wildcard in **GW{target_wc_gw}** to fill your squad and bench entirely with DGW players.")
+                break 
+
+    # 4. Map Triple Captain
+    if 'Triple Captain' in available_chips and dgws:
+        for dgw in dgws:
+            if dgw['GW'] not in planned_chips:
+                planned_chips[dgw['GW']] = "Triple Captain"
+                suggestions.append(f"👑 **Triple Captain Strategy:** Attack **GW{dgw['GW']}**. Premium players from {', '.join(dgw['Doubles'][:3])} have two fixtures to secure a massive haul.")
+                break
+                
+    # 5. Fallback for remaining chips with no obvious fixture targets
+    for chip in available_chips:
+        base_chip = chip.split(' (')[0]
+        if base_chip not in [val for val in planned_chips.values()]:
+            if base_chip == 'Wildcard':
+                suggestions.append(f"🃏 **Wildcard:** No major Double Gameweeks immediately follow to prepare for. Use this strictly when your squad has 3+ long-term injuries or deep structural issues.")
+            elif base_chip == 'Free Hit':
+                suggestions.append(f"🔴 **Free Hit:** No massive Blank Gameweeks remaining. Save this for unforeseen postponements, or attack a standard week where top teams have highly favorable matchups.")
+            elif base_chip == 'Bench Boost':
+                 suggestions.append(f"🔥 **Bench Boost:** No massive Doubles left. Play this in a standard week where your 4 bench players all have excellent home fixtures against weak opposition.")
+            elif base_chip == 'Triple Captain':
+                suggestions.append(f"👑 **Triple Captain:** No massive Doubles left. Hold this until a premium player (like Haaland or Salah) plays a relegation-threatened team at home.")
+
+    if not suggestions and not available_chips:
+        suggestions.append("🧘 **No Chips Left:** Your focus now is pure long-term planning. Roll your free transfers where possible to give yourself flexibility!")
         
     return suggestions
 
@@ -712,9 +827,50 @@ if players_df is not None:
                 'Actual Sell Price (£)': '{:.1f}', 'Profit (£)': '{:.1f}'
             }), use_container_width=True, hide_index=True)
 
+    # # --- TAB 5: NEW FIXTURES & CHIP STRATEGY ---
+    # with tab5:
+    #     st.header("📅 Fixtures & Chips Strategy")
+    #     if my_team is not None:
+    #         col_chips, col_sched = st.columns([1, 2])
+            
+    #         with col_chips:
+    #             st.subheader("🎒 Your Available Chips")
+    #             if st.session_state.available_chips:
+    #                 for chip in st.session_state.available_chips:
+    #                     st.success(f"✅ {chip}")
+    #             else:
+    #                 st.error("❌ No chips remaining!")
+            
+    #         with col_sched:
+    #             st.subheader("🔭 Next 4 Gameweeks Radar")
+    #             with st.spinner("Scanning schedule for DGWs and BGWs..."):
+    #                 density_report = get_fixture_density(st.session_state.gw, lookahead=4)
+                    
+    #                 if density_report:
+    #                     for gw_data in density_report:
+    #                         gw = gw_data['GW']
+                            
+    #                         if gw_data['Blanks'] or gw_data['Doubles']:
+    #                             with st.expander(f"Gameweek {gw} Exceptions", expanded=True):
+    #                                 if gw_data['Doubles']:
+    #                                     st.markdown(f"**🟢 Doubles (Plays Twice):** {', '.join(gw_data['Doubles'])}")
+    #                                 if gw_data['Blanks']:
+    #                                     st.markdown(f"**🔴 Blanks (0 Fixtures):** {', '.join(gw_data['Blanks'])}")
+    #                         else:
+    #                             st.write(f"**Gameweek {gw}:** Standard fixtures (all teams play once).")
+                                
+    #         st.divider()
+    #         st.subheader("💡 Strategic Advice")
+    #         if density_report:
+    #             advice = suggest_chip_strategy(density_report, st.session_state.available_chips)
+    #             for line in advice:
+    #                 st.markdown(line)
+    #     else:
+    #         st.info("⚠️ Please click 'Analyze My Team' in the sidebar to load your chip and fixture data.")
+
     # --- TAB 5: NEW FIXTURES & CHIP STRATEGY ---
     with tab5:
-        st.header("📅 Fixtures & Chips Strategy")
+        st.header("📅 Rest-of-Season Fixtures & Chip Planner")
         if my_team is not None:
             col_chips, col_sched = st.columns([1, 2])
             
@@ -725,31 +881,33 @@ if players_df is not None:
                         st.success(f"✅ {chip}")
                 else:
                     st.error("❌ No chips remaining!")
+                    
+                st.divider()
+                st.subheader("💡 Strategic Roadmap")
+                density_report = get_fixture_density(st.session_state.gw, end_gw=38)
+                if density_report:
+                    advice = suggest_chip_strategy(density_report, st.session_state.available_chips)
+                    for line in advice:
+                        st.markdown(line)
             
             with col_sched:
-                st.subheader("🔭 Next 4 Gameweeks Radar")
-                with st.spinner("Scanning schedule for DGWs and BGWs..."):
-                    density_report = get_fixture_density(st.session_state.gw, lookahead=4)
-                    
+                st.subheader("🔭 Gameweek Exception Radar (Rest of Season)")
+                with st.spinner("Scanning all remaining schedules for DGWs and BGWs..."):
                     if density_report:
+                        exceptions_found = False
                         for gw_data in density_report:
                             gw = gw_data['GW']
                             
                             if gw_data['Blanks'] or gw_data['Doubles']:
+                                exceptions_found = True
                                 with st.expander(f"Gameweek {gw} Exceptions", expanded=True):
                                     if gw_data['Doubles']:
                                         st.markdown(f"**🟢 Doubles (Plays Twice):** {', '.join(gw_data['Doubles'])}")
                                     if gw_data['Blanks']:
                                         st.markdown(f"**🔴 Blanks (0 Fixtures):** {', '.join(gw_data['Blanks'])}")
-                            else:
-                                st.write(f"**Gameweek {gw}:** Standard fixtures (all teams play once).")
-                                
-            st.divider()
-            st.subheader("💡 Strategic Advice")
-            if density_report:
-                advice = suggest_chip_strategy(density_report, st.session_state.available_chips)
-                for line in advice:
-                    st.markdown(line)
+                        
+                        if not exceptions_found:
+                            st.info("No more Double or Blank Gameweeks currently scheduled for the rest of the season. All standard fixtures.")
         else:
             st.info("⚠️ Please click 'Analyze My Team' in the sidebar to load your chip and fixture data.")
 
