@@ -808,7 +808,7 @@ if players_df is not None:
             
             my_team_raw['purchase_price'] = my_team_raw['element'].map(lambda x: financials[x]['purchase_price'])
             my_team_raw['selling_price'] = my_team_raw['element'].map(lambda x: financials[x]['selling_price'])
-            my_team_raw['profit'] = my_my_team_raw['element'].map(lambda x: financials[x]['profit'])
+            my_team_raw['profit'] = my_team_raw['element'].map(lambda x: financials[x]['profit'])
             
             my_team_temp = my_team_raw.merge(players_df[['id', 'web_name', 'now_cost', 'element_type', 'ep_next']], left_on='element', right_on='id')
             
