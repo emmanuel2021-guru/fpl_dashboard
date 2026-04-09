@@ -1,4 +1,3 @@
-import google.generativeai as genai
 import streamlit as st
 import pandas as pd
 import requests
@@ -122,6 +121,84 @@ def get_player_financials(manager_id, current_squad_ids):
         
     return financials
 
+def get_available_chips(manager_id):
+    """Checks the FPL API for chips the manager has already used."""
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    res = requests.get(f'https://fantasy.premierleague.com/api/entry/{manager_id}/history/', headers=headers)
+    if res.status_code != 200: 
+        return []
+        
+    history = res.json()
+    used_chips = [chip['name'] for chip in history.get('chips', [])]
+    
+    available = []
+    if 'bboost' not in used_chips: available.append('Bench Boost')
+    if '3xc' not in used_chips: available.append('Triple Captain')
+    if 'freehit' not in used_chips: available.append('Free Hit')
+    
+    # FPL managers get 2 wildcards a season
+    wc_used = used_chips.count('wildcard')
+    if wc_used == 0: available.append('Wildcard (x2)')
+    elif wc_used == 1: available.append('Wildcard (x1)')
+    
+    return available
+
+def get_fixture_density(gw_start, lookahead=4):
+    """Scans the FPL schedule to find Blank and Double Gameweeks."""
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    fix_res = requests.get('https://fantasy.premierleague.com/api/fixtures/', headers=headers)
+    teams_res = requests.get('https://fantasy.premierleague.com/api/bootstrap-static/', headers=headers)
+    
+    if fix_res.status_code != 200 or teams_res.status_code != 200: 
+        return []
+        
+    fixtures = fix_res.json()
+    teams = {t['id']: t['short_name'] for t in teams_res.json()['teams']}
+    
+    gw_end = gw_start + lookahead - 1
+    relevant_fixtures = [f for f in fixtures if f['event'] and gw_start <= f['event'] <= gw_end]
+    
+    density = {gw: {team_id: 0 for team_id in teams.keys()} for gw in range(gw_start, gw_end + 1)}
+    
+    for f in relevant_fixtures:
+        if f['team_h'] in density[f['event']]: density[f['event']][f['team_h']] += 1
+        if f['team_a'] in density[f['event']]: density[f['event']][f['team_a']] += 1
+        
+    report = []
+    for gw in range(gw_start, gw_end + 1):
+        bgw_teams = [teams[t] for t, count in density[gw].items() if count == 0]
+        dgw_teams = [teams[t] for t, count in density[gw].items() if count > 1]
+        report.append({"GW": gw, "Blanks": bgw_teams, "Doubles": dgw_teams})
+        
+    return report
+
+def suggest_chip_strategy(density_report, available_chips):
+    """Generates chip advice based on upcoming fixture congestion."""
+    suggestions = []
+    for gw_data in density_report:
+        gw = gw_data['GW']
+        blanks = gw_data['Blanks']
+        doubles = gw_data['Doubles']
+        
+        if len(blanks) >= 4 and 'Free Hit' in available_chips:
+            suggestions.append(f"⚠️ **GW{gw} Alert:** {len(blanks)} teams are blanking ({', '.join(blanks[:4])}...). Highly consider using your **Free Hit** here.")
+        elif len(blanks) > 0:
+            suggestions.append(f"ℹ️ **GW{gw} Minor Blank:** Watch out, {', '.join(blanks)} do not play.")
+        
+        if len(doubles) >= 3:
+            if 'Bench Boost' in available_chips:
+                suggestions.append(f"🔥 **GW{gw} Massive Double:** {len(doubles)} teams play twice! Perfect time for a **Bench Boost**.")
+            if 'Triple Captain' in available_chips:
+                suggestions.append(f"👑 **GW{gw} Double Gameweek Alert:** Consider using **Triple Captain** on a premium player from {', '.join(doubles[:3])}.")
+        elif len(doubles) > 0:
+            if 'Triple Captain' in available_chips:
+                suggestions.append(f"🎯 **GW{gw} Double:** {', '.join(doubles)} play twice. Could be a cheeky **Triple Captain** opportunity.")
+                
+    if not suggestions:
+        suggestions.append("🧘 **Patience:** Keep your chips for now. No obvious major DGW/BGW chip strategies in the immediate horizon.")
+        
+    return suggestions
+
 def optimize_starting_lineup(team_df):
     prob = pulp.LpProblem("Best_XI", pulp.LpMaximize)
     player_vars = pulp.LpVariable.dicts("p", team_df.index, cat='Binary')
@@ -198,6 +275,296 @@ def generate_free_hit(targets_df, budget):
     prob.solve(pulp.PULP_CBC_CMD(msg=False))
     return targets_df.loc[[i for i in targets_df.index if player_vars[i].varValue == 1]].copy().sort_values(['element_type', 'ep_next'], ascending=[True, False])
 
+# # --- 3. UI LAYOUT & INTERFACE ---
+# players_df, targets_df, gw_df = load_csv_data()
+
+# if players_df is not None:
+#     st.sidebar.header("🛠️ Manager Settings")
+#     manager_id_input = st.sidebar.text_input("Enter FPL Manager ID", "9478527")
+#     free_transfers = st.sidebar.number_input("Free Transfers Available", min_value=1, max_value=5, value=1)
+#     analyze_button = st.sidebar.button("Analyze My Team")
+
+#     st.sidebar.header("🧠 AI Settings")
+#     api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Get a free key at aistudio.google.com")
+    
+#     tab1, tab2, tab3, tab4 = st.tabs(["📊 My Team Analysis", "🎯 Master Target List", "🃏 Smart Wildcard", "🔥 1-Week Free Hit"])
+    
+#     if "my_team" not in st.session_state:
+#         st.session_state.my_team = None
+#         st.session_state.bank = 0.0
+#         st.session_state.sale_value = 100.0
+#         st.session_state.total_value = 100.0
+
+#     if analyze_button and manager_id_input.isdigit():
+#         manager_id = int(manager_id_input)
+#         gw = get_current_gameweek(gw_df)
+#         manager_data = fetch_manager_data(manager_id, gw)
+        
+#         if manager_data:
+#             my_team_raw = manager_data["team"]
+#             st.session_state.bank = manager_data["bank"]
+            
+#             # --- THE FINANCIAL MERGE ---
+#             squad_ids = my_team_raw['element'].tolist()
+#             financials = get_player_financials(manager_id, squad_ids)
+            
+#             my_team_raw['purchase_price'] = my_team_raw['element'].map(lambda x: financials[x]['purchase_price'])
+#             my_team_raw['selling_price'] = my_team_raw['element'].map(lambda x: financials[x]['selling_price'])
+#             my_team_raw['profit'] = my_team_raw['element'].map(lambda x: financials[x]['profit'])
+            
+#             my_team_temp = my_team_raw.merge(players_df[['id', 'web_name', 'now_cost', 'element_type', 'ep_next']], left_on='element', right_on='id')
+#             my_team_temp = my_team_temp.merge(targets_df[['web_name', 'buy_rating', 'next_3_fdr']], on='web_name', how='left')
+#             my_team_temp['buy_rating'] = my_team_temp['buy_rating'].fillna(0.0)
+            
+#             st.session_state.total_value = round(my_team_temp['now_cost'].sum() + st.session_state.bank, 1)
+#             st.session_state.sale_value = round(my_team_temp['selling_price'].sum() + st.session_state.bank, 1)
+#             st.session_state.my_team = my_team_temp
+
+#     my_team = st.session_state.my_team
+#     bank = st.session_state.bank
+#     sale_value = st.session_state.sale_value
+#     total_value = st.session_state.total_value
+
+#     # --- TAB 1: TEAM ANALYSIS ---
+#     with tab1:
+#         if my_team is not None:
+#             st.success("✅ Data & Financials fetched successfully!")
+#             c1, c2, c3 = st.columns(3)
+#             c1.metric(label="💰 Money in the Bank", value=f"£{bank}m")
+#             c2.metric(label="📈 Squad Value (Raw)", value=f"£{total_value}m")
+#             c3.metric(label="📉 Real Sale Value", value=f"£{sale_value}m", help="This is your actual spending power after the 50% profit tax.")
+#             st.divider()
+            
+#             col1, col2 = st.columns([1.5, 1])
+            
+#             with col1:
+#                 st.subheader("📋 Optimal Starting XI & Bench")
+#                 starters, bench = optimize_starting_lineup(my_team)
+                
+#                 st.markdown("**Starting 11 (Sorted by Match Rating + Captaincy)**")
+#                 st.dataframe(starters[['Role', 'Position', 'web_name', 'ep_next', 'next_3_fdr', 'starter_score']], use_container_width=True, hide_index=True)
+                
+#                 st.markdown("**Auto-Subs Bench (Optimal Order)**")
+#                 st.dataframe(bench[['Role', 'Position', 'web_name', 'ep_next', 'starter_score']], use_container_width=True, hide_index=True)
+                
+#             with col2:
+#                 st.subheader("🔄 Transfer Optimizer")
+                
+#                 blanking_starters = starters[starters['ep_next'] <= 0]
+#                 blanking_bench = bench[bench['ep_next'] <= 0]
+#                 mids_and_fwds = my_team[(my_team['element_type_x'].isin([3, 4])) & (my_team['ep_next'] > 0)].sort_values('buy_rating', ascending=True)
+#                 potential_sells = pd.concat([blanking_starters, blanking_bench, mids_and_fwds])
+                
+#                 current_bank = bank
+#                 hyp_squad = my_team.copy()
+#                 owned_names = hyp_squad['web_name'].tolist()
+#                 transfers_made = 0
+                
+#                 for index, weakest_link in potential_sells.iterrows():
+#                     if transfers_made >= free_transfers: break
+                        
+#                     # TRUE SELLING PRICE FIX
+#                     sell_price = weakest_link['selling_price']
+#                     available_funds = round(current_bank + sell_price, 1)
+                    
+#                     is_emergency = weakest_link['ep_next'] <= 0
+#                     sell_reason = "Emergency (Blank/Injured)" if is_emergency else "Lowest Squad Rating"
+                    
+#                     affordable_targets = targets_df[
+#                         (~targets_df['web_name'].isin(owned_names)) & 
+#                         (targets_df['element_type'] == weakest_link['element_type_x']) &
+#                         (targets_df['now_cost'] <= available_funds) &
+#                         (targets_df['ep_next'].astype(float) > 0.5) 
+#                     ].sort_values('buy_rating', ascending=False)
+                    
+#                     if not affordable_targets.empty:
+#                         top_replacement = affordable_targets.iloc[0]
+#                         point_swing = round(top_replacement['buy_rating'] - weakest_link['buy_rating'], 2)
+                        
+#                         if is_emergency or point_swing > 0:
+#                             st.error(f"📉 **SELL:** {weakest_link['web_name']} (Sell Price: £{sell_price:.1f}m | Profit: £{weakest_link['profit']:.1f}m)")
+#                             st.caption(f"Reason: {sell_reason}")
+#                             st.success(f"📈 **BUY:** {top_replacement['web_name']} (£{top_replacement['now_cost']:.1f}m) - Rating: {round(top_replacement['buy_rating'], 2)}")
+                            
+#                             if is_emergency: st.metric(label="Expected Rating Swing", value="FIXED SQUAD")
+#                             else: st.metric(label="Expected Rating Swing", value=f"+{point_swing}")
+#                             st.divider()
+                            
+#                             current_bank = available_funds - top_replacement['now_cost']
+#                             owned_names.append(top_replacement['web_name'])
+                            
+#                             hyp_squad = hyp_squad[hyp_squad['web_name'] != weakest_link['web_name']]
+#                             new_player = top_replacement.to_frame().T
+#                             new_player['element_type_x'] = new_player['element_type']
+#                             hyp_squad = pd.concat([hyp_squad, new_player], ignore_index=True)
+                            
+#                             transfers_made += 1
+                
+#                 if transfers_made > 0:
+#                     with st.expander(f"🔮 View Squad After ALL {transfers_made} Transfer(s)", expanded=False):
+#                         hyp_starters, hyp_bench = optimize_starting_lineup(hyp_squad)
+#                         st.markdown("**New Starting 11 & Captaincy**")
+#                         st.dataframe(hyp_starters[['Role', 'Position', 'web_name', 'starter_score']], use_container_width=True, hide_index=True)
+#                 else:
+#                     st.info("Hold your transfers! Your current squad mathematically outperforms affordable alternatives.")
+            
+#             # --- NEW SECTION: FINANCIAL TRACKER ---
+#             st.divider()
+#             st.subheader("💵 Squad Financial Tracker")
+#             st.write("Track exactly how much profit your players have made, and how much FPL will let you sell them for.")
+            
+#             display_fin = my_team[['web_name', 'purchase_price', 'now_cost', 'selling_price', 'profit']].copy()
+#             # Rename columns for the UI
+#             display_fin.columns = ['Player', 'Bought For (£)', 'Current Value (£)', 'Actual Sell Price (£)', 'Profit (£)']
+#             display_fin = display_fin.sort_values('Profit (£)', ascending=False)
+#             st.dataframe(display_fin.style.format({
+#                 'Bought For (£)': '{:.1f}', 'Current Value (£)': '{:.1f}', 
+#                 'Actual Sell Price (£)': '{:.1f}', 'Profit (£)': '{:.1f}'
+#             }), use_container_width=True, hide_index=True)
+
+#         # --- TAB 1 BOTTOM: AI ASSISTANT MANAGER ---
+#         st.divider()
+#         st.subheader("🤖 Chat with your Assistant Manager")
+
+#         if not api_key:
+#             st.info("🔑 Enter your Gemini API Key in the sidebar to activate the AI Assistant.")
+#         else:
+#             genai.configure(api_key=api_key)
+#             model = genai.GenerativeModel(model_name='gemini-2.5-flash', tools='google_search')
+
+#             if "messages" not in st.session_state: st.session_state.messages = []
+#             for message in st.session_state.messages:
+#                 with st.chat_message(message["role"]): st.markdown(message["content"])
+
+#             user_question = st.chat_input("E.g., 'Is Saka injured? Should I bench him?'")
+
+#             if user_question:
+#                 with st.chat_message("user"): st.markdown(user_question)
+#                 st.session_state.messages.append({"role": "user", "content": user_question})
+
+#                 if my_team is not None:
+#                     ai_starters, ai_bench = optimize_starting_lineup(my_team)
+#                     gemini_history = []
+#                     for msg in st.session_state.messages[:-1]: 
+#                         gemini_role = "model" if msg["role"] == "assistant" else "user"
+#                         gemini_history.append({"role": gemini_role, "parts": [msg["content"]]})
+
+#                     hidden_prompt = f"""
+#                     CURRENT TEAM CONTEXT:
+#                     Bank: £{bank}m | Real Sale Value: £{sale_value}m
+#                     Starters:
+#                     {ai_starters[['Position', 'web_name', 'ep_next', 'next_3_fdr']].to_string(index=False)}
+#                     Bench:
+#                     {ai_bench[['Position', 'web_name', 'ep_next']].to_string(index=False)}
+                    
+#                     INSTRUCTIONS:
+#                     You are an elite FPL Assistant Manager. Answer the user's question using the team data above.
+#                     CRITICAL RULE: If the user asks about a player's real-world status (injuries, rotation, press conferences), use your Google Search tool to find live news before answering.
+                    
+#                     USER QUESTION: {user_question}
+#                     """
+#                     gemini_history.append({"role": "user", "parts": [hidden_prompt]})
+
+#                     with st.chat_message("assistant"):
+#                         with st.spinner("Searching the web and analyzing your squad..."):
+#                             try:
+#                                 response = model.generate_content(gemini_history)
+#                                 st.markdown(response.text)
+#                                 st.session_state.messages.append({"role": "assistant", "content": response.text})
+#                             except Exception as e:
+#                                 st.error(f"API Error: {str(e)}")
+#                 else:
+#                     with st.chat_message("assistant"): st.warning("⚠️ Please scroll up and click 'Analyze My Team' first!")
+
+#     # --- TAB 2, 3, 4 (No changes needed) ---
+#     with tab2:
+#         st.header("🎯 Master Transfer Targets")
+#         st.dataframe(targets_df, use_container_width=True, hide_index=True)
+
+#     # with tab3:
+#     #     st.header("🃏 Smart Wildcard Generator")
+#     #     selected_budget = st.slider("Set Wildcard Budget (£m)", min_value=90.0, max_value=110.0, value=float(sale_value), step=0.1)
+#     #     if st.button("Generate Wildcard Squad"):
+#     #         with st.spinner("Crunching the numbers..."):
+#     #             clean_targets = targets_df.dropna(subset=['now_cost', 'buy_rating']).copy()
+#     #             clean_targets = clean_targets[clean_targets['ep_next'].astype(float) > 0.5]
+#     #             wc_team = generate_wildcard(clean_targets, selected_budget)
+#     #             wc_starters, wc_bench = optimize_starting_lineup(wc_team)
+#     #             total_cost = round(wc_team['now_cost'].sum(), 1)
+#     #             colA, colB = st.columns(2)
+#     #             colA.metric("Total Squad Cost", f"£{total_cost}m")
+#     #             st.dataframe(wc_starters[['Role', 'Position', 'web_name', 'starter_score']], use_container_width=True, hide_index=True)
+
+#     # with tab4:
+#     #     st.header("🔥 1-Week Free Hit Engine")
+#     #     fh_budget = st.slider("Set Free Hit Budget (£m)", min_value=90.0, max_value=110.0, value=float(sale_value), step=0.1, key="fh_budget")
+#     #     if st.button("Generate Free Hit Squad"):
+#     #         with st.spinner("Optimizing purely for the upcoming Gameweek..."):
+#     #             clean_targets = targets_df.dropna(subset=['now_cost', 'ep_next']).copy()
+#     #             clean_targets = clean_targets[clean_targets['ep_next'].astype(float) > 0.5]
+#     #             fh_team = generate_free_hit(clean_targets, fh_budget)
+#     #             fh_starters, fh_bench = optimize_starting_lineup(fh_team)
+#     #             total_fh_cost = round(fh_team['now_cost'].sum(), 1)
+#     #             colA, colB = st.columns(2)
+#     #             colA.metric("Total Squad Cost", f"£{total_fh_cost}m")
+#     #             st.dataframe(fh_starters[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
+
+#     # --- TAB 3: SMART WILDCARD ---
+#     with tab3:
+#         st.header("🃏 Smart Wildcard Generator")
+#         selected_budget = st.slider("Set Wildcard Budget (£m)", min_value=90.0, max_value=110.0, value=float(sale_value), step=0.1)
+        
+#         if st.button("Generate Wildcard Squad"):
+#             with st.spinner("Crunching the numbers..."):
+#                 clean_targets = targets_df.dropna(subset=['now_cost', 'buy_rating']).copy()
+#                 clean_targets = clean_targets[clean_targets['ep_next'].astype(float) > 0.5]
+                
+#                 wc_team = generate_wildcard(clean_targets, selected_budget)
+#                 wc_starters, wc_bench = optimize_starting_lineup(wc_team)
+                
+#                 total_cost = round(wc_team['now_cost'].sum(), 1)
+#                 total_rating = round(wc_team['buy_rating'].sum(), 2)
+                
+#                 colA, colB = st.columns(2)
+#                 colA.metric("Total Squad Cost", f"£{total_cost}m")
+#                 colB.metric("Total Squad Rating", f"{total_rating} pts")
+                
+#                 st.subheader("📋 Optimal Wildcard Starting XI & Bench")
+#                 st.markdown("**Starting 11 (Sorted by Match Rating + Captaincy)**")
+#                 st.dataframe(wc_starters[['Role', 'Position', 'web_name', 'starter_score']], use_container_width=True, hide_index=True)
+                
+#                 # THE FIX: Added the Bench UI rendering back in!
+#                 st.markdown("**Auto-Subs Bench (Optimal Order)**")
+#                 st.dataframe(wc_bench[['Role', 'Position', 'web_name', 'starter_score']], use_container_width=True, hide_index=True)
+
+#     # --- TAB 4: FREE HIT ENGINE ---
+#     with tab4:
+#         st.header("🔥 1-Week Free Hit Engine")
+#         fh_budget = st.slider("Set Free Hit Budget (£m)", min_value=90.0, max_value=110.0, value=float(sale_value), step=0.1, key="fh_budget")
+        
+#         if st.button("Generate Free Hit Squad"):
+#             with st.spinner("Optimizing purely for the upcoming Gameweek..."):
+#                 clean_targets = targets_df.dropna(subset=['now_cost', 'ep_next']).copy()
+#                 clean_targets = clean_targets[clean_targets['ep_next'].astype(float) > 0.5]
+                
+#                 fh_team = generate_free_hit(clean_targets, fh_budget)
+#                 fh_starters, fh_bench = optimize_starting_lineup(fh_team)
+                
+#                 total_fh_cost = round(fh_team['now_cost'].sum(), 1)
+#                 total_fh_ep = round(fh_team['ep_next'].sum(), 2)
+                
+#                 colA, colB = st.columns(2)
+#                 colA.metric("Total Squad Cost", f"£{total_fh_cost}m")
+#                 colB.metric("Total Squad Expected Points", f"{total_fh_ep} pts")
+                
+#                 st.subheader("📋 Optimal Free Hit Starting XI & Bench")
+#                 st.markdown("**Starting 11 (Sorted by 1-Week Potential)**")
+#                 st.dataframe(fh_starters[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
+                
+#                 # THE FIX: Added the Bench UI rendering back in!
+#                 st.markdown("**Auto-Subs Bench**")
+#                 st.dataframe(fh_bench[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
+
 # --- 3. UI LAYOUT & INTERFACE ---
 players_df, targets_df, gw_df = load_csv_data()
 
@@ -206,22 +573,25 @@ if players_df is not None:
     manager_id_input = st.sidebar.text_input("Enter FPL Manager ID", "9478527")
     free_transfers = st.sidebar.number_input("Free Transfers Available", min_value=1, max_value=5, value=1)
     analyze_button = st.sidebar.button("Analyze My Team")
-
-    st.sidebar.header("🧠 AI Settings")
-    api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Get a free key at aistudio.google.com")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 My Team Analysis", "🎯 Master Target List", "🃏 Smart Wildcard", "🔥 1-Week Free Hit"])
+    # NEW TABS SETUP
+    tab1, tab5, tab2, tab3, tab4 = st.tabs(["📊 My Team Analysis", "📅 Fixtures & Chips", "🎯 Master Target List", "🃏 Smart Wildcard", "🔥 1-Week Free Hit"])
     
     if "my_team" not in st.session_state:
         st.session_state.my_team = None
         st.session_state.bank = 0.0
         st.session_state.sale_value = 100.0
         st.session_state.total_value = 100.0
+        st.session_state.available_chips = []
+        st.session_state.gw = 1
 
     if analyze_button and manager_id_input.isdigit():
         manager_id = int(manager_id_input)
         gw = get_current_gameweek(gw_df)
+        st.session_state.gw = gw
+        
         manager_data = fetch_manager_data(manager_id, gw)
+        st.session_state.available_chips = get_available_chips(manager_id)
         
         if manager_data:
             my_team_raw = manager_data["team"]
@@ -286,7 +656,6 @@ if players_df is not None:
                 for index, weakest_link in potential_sells.iterrows():
                     if transfers_made >= free_transfers: break
                         
-                    # TRUE SELLING PRICE FIX
                     sell_price = weakest_link['selling_price']
                     available_funds = round(current_bank + sell_price, 1)
                     
@@ -331,13 +700,11 @@ if players_df is not None:
                 else:
                     st.info("Hold your transfers! Your current squad mathematically outperforms affordable alternatives.")
             
-            # --- NEW SECTION: FINANCIAL TRACKER ---
             st.divider()
             st.subheader("💵 Squad Financial Tracker")
             st.write("Track exactly how much profit your players have made, and how much FPL will let you sell them for.")
             
             display_fin = my_team[['web_name', 'purchase_price', 'now_cost', 'selling_price', 'profit']].copy()
-            # Rename columns for the UI
             display_fin.columns = ['Player', 'Bought For (£)', 'Current Value (£)', 'Actual Sell Price (£)', 'Profit (£)']
             display_fin = display_fin.sort_values('Profit (£)', ascending=False)
             st.dataframe(display_fin.style.format({
@@ -345,92 +712,51 @@ if players_df is not None:
                 'Actual Sell Price (£)': '{:.1f}', 'Profit (£)': '{:.1f}'
             }), use_container_width=True, hide_index=True)
 
-        # --- TAB 1 BOTTOM: AI ASSISTANT MANAGER ---
-        st.divider()
-        st.subheader("🤖 Chat with your Assistant Manager")
-
-        if not api_key:
-            st.info("🔑 Enter your Gemini API Key in the sidebar to activate the AI Assistant.")
-        else:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(model_name='gemini-2.5-flash', tools='google_search')
-
-            if "messages" not in st.session_state: st.session_state.messages = []
-            for message in st.session_state.messages:
-                with st.chat_message(message["role"]): st.markdown(message["content"])
-
-            user_question = st.chat_input("E.g., 'Is Saka injured? Should I bench him?'")
-
-            if user_question:
-                with st.chat_message("user"): st.markdown(user_question)
-                st.session_state.messages.append({"role": "user", "content": user_question})
-
-                if my_team is not None:
-                    ai_starters, ai_bench = optimize_starting_lineup(my_team)
-                    gemini_history = []
-                    for msg in st.session_state.messages[:-1]: 
-                        gemini_role = "model" if msg["role"] == "assistant" else "user"
-                        gemini_history.append({"role": gemini_role, "parts": [msg["content"]]})
-
-                    hidden_prompt = f"""
-                    CURRENT TEAM CONTEXT:
-                    Bank: £{bank}m | Real Sale Value: £{sale_value}m
-                    Starters:
-                    {ai_starters[['Position', 'web_name', 'ep_next', 'next_3_fdr']].to_string(index=False)}
-                    Bench:
-                    {ai_bench[['Position', 'web_name', 'ep_next']].to_string(index=False)}
-                    
-                    INSTRUCTIONS:
-                    You are an elite FPL Assistant Manager. Answer the user's question using the team data above.
-                    CRITICAL RULE: If the user asks about a player's real-world status (injuries, rotation, press conferences), use your Google Search tool to find live news before answering.
-                    
-                    USER QUESTION: {user_question}
-                    """
-                    gemini_history.append({"role": "user", "parts": [hidden_prompt]})
-
-                    with st.chat_message("assistant"):
-                        with st.spinner("Searching the web and analyzing your squad..."):
-                            try:
-                                response = model.generate_content(gemini_history)
-                                st.markdown(response.text)
-                                st.session_state.messages.append({"role": "assistant", "content": response.text})
-                            except Exception as e:
-                                st.error(f"API Error: {str(e)}")
+    # --- TAB 5: NEW FIXTURES & CHIP STRATEGY ---
+    with tab5:
+        st.header("📅 Fixtures & Chips Strategy")
+        if my_team is not None:
+            col_chips, col_sched = st.columns([1, 2])
+            
+            with col_chips:
+                st.subheader("🎒 Your Available Chips")
+                if st.session_state.available_chips:
+                    for chip in st.session_state.available_chips:
+                        st.success(f"✅ {chip}")
                 else:
-                    with st.chat_message("assistant"): st.warning("⚠️ Please scroll up and click 'Analyze My Team' first!")
+                    st.error("❌ No chips remaining!")
+            
+            with col_sched:
+                st.subheader("🔭 Next 4 Gameweeks Radar")
+                with st.spinner("Scanning schedule for DGWs and BGWs..."):
+                    density_report = get_fixture_density(st.session_state.gw, lookahead=4)
+                    
+                    if density_report:
+                        for gw_data in density_report:
+                            gw = gw_data['GW']
+                            
+                            if gw_data['Blanks'] or gw_data['Doubles']:
+                                with st.expander(f"Gameweek {gw} Exceptions", expanded=True):
+                                    if gw_data['Doubles']:
+                                        st.markdown(f"**🟢 Doubles (Plays Twice):** {', '.join(gw_data['Doubles'])}")
+                                    if gw_data['Blanks']:
+                                        st.markdown(f"**🔴 Blanks (0 Fixtures):** {', '.join(gw_data['Blanks'])}")
+                            else:
+                                st.write(f"**Gameweek {gw}:** Standard fixtures (all teams play once).")
+                                
+            st.divider()
+            st.subheader("💡 Strategic Advice")
+            if density_report:
+                advice = suggest_chip_strategy(density_report, st.session_state.available_chips)
+                for line in advice:
+                    st.markdown(line)
+        else:
+            st.info("⚠️ Please click 'Analyze My Team' in the sidebar to load your chip and fixture data.")
 
-    # --- TAB 2, 3, 4 (No changes needed) ---
+    # --- TAB 2: MASTER TARGETS ---
     with tab2:
         st.header("🎯 Master Transfer Targets")
         st.dataframe(targets_df, use_container_width=True, hide_index=True)
-
-    # with tab3:
-    #     st.header("🃏 Smart Wildcard Generator")
-    #     selected_budget = st.slider("Set Wildcard Budget (£m)", min_value=90.0, max_value=110.0, value=float(sale_value), step=0.1)
-    #     if st.button("Generate Wildcard Squad"):
-    #         with st.spinner("Crunching the numbers..."):
-    #             clean_targets = targets_df.dropna(subset=['now_cost', 'buy_rating']).copy()
-    #             clean_targets = clean_targets[clean_targets['ep_next'].astype(float) > 0.5]
-    #             wc_team = generate_wildcard(clean_targets, selected_budget)
-    #             wc_starters, wc_bench = optimize_starting_lineup(wc_team)
-    #             total_cost = round(wc_team['now_cost'].sum(), 1)
-    #             colA, colB = st.columns(2)
-    #             colA.metric("Total Squad Cost", f"£{total_cost}m")
-    #             st.dataframe(wc_starters[['Role', 'Position', 'web_name', 'starter_score']], use_container_width=True, hide_index=True)
-
-    # with tab4:
-    #     st.header("🔥 1-Week Free Hit Engine")
-    #     fh_budget = st.slider("Set Free Hit Budget (£m)", min_value=90.0, max_value=110.0, value=float(sale_value), step=0.1, key="fh_budget")
-    #     if st.button("Generate Free Hit Squad"):
-    #         with st.spinner("Optimizing purely for the upcoming Gameweek..."):
-    #             clean_targets = targets_df.dropna(subset=['now_cost', 'ep_next']).copy()
-    #             clean_targets = clean_targets[clean_targets['ep_next'].astype(float) > 0.5]
-    #             fh_team = generate_free_hit(clean_targets, fh_budget)
-    #             fh_starters, fh_bench = optimize_starting_lineup(fh_team)
-    #             total_fh_cost = round(fh_team['now_cost'].sum(), 1)
-    #             colA, colB = st.columns(2)
-    #             colA.metric("Total Squad Cost", f"£{total_fh_cost}m")
-    #             st.dataframe(fh_starters[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
 
     # --- TAB 3: SMART WILDCARD ---
     with tab3:
@@ -456,7 +782,6 @@ if players_df is not None:
                 st.markdown("**Starting 11 (Sorted by Match Rating + Captaincy)**")
                 st.dataframe(wc_starters[['Role', 'Position', 'web_name', 'starter_score']], use_container_width=True, hide_index=True)
                 
-                # THE FIX: Added the Bench UI rendering back in!
                 st.markdown("**Auto-Subs Bench (Optimal Order)**")
                 st.dataframe(wc_bench[['Role', 'Position', 'web_name', 'starter_score']], use_container_width=True, hide_index=True)
 
@@ -484,6 +809,5 @@ if players_df is not None:
                 st.markdown("**Starting 11 (Sorted by 1-Week Potential)**")
                 st.dataframe(fh_starters[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
                 
-                # THE FIX: Added the Bench UI rendering back in!
                 st.markdown("**Auto-Subs Bench**")
                 st.dataframe(fh_bench[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
