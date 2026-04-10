@@ -3,6 +3,8 @@ import pandas as pd
 import requests
 import pulp
 import math
+import os               # <-- ADD THIS
+from datetime import datetime # <-- ADD THIS
 
 from fpl_foundation import fetch_core_fpl_data, process_and_save
 from fpl_phase2 import generate_transfer_targets
@@ -11,12 +13,24 @@ from fpl_phase2 import generate_transfer_targets
 st.set_page_config(page_title="FPL Auto-Analyzer", layout="wide", page_icon="⚽")
 st.title("🏆 Ultimate FPL Auto-Analyzer")
 
-fpl_data = fetch_core_fpl_data()
-if fpl_data:
-    process_and_save(fpl_data)
-    print("Phase 1 Complete! You now have your core data pipeline.")
+# fpl_data = fetch_core_fpl_data()
+# if fpl_data:
+#     process_and_save(fpl_data)
+#     print("Phase 1 Complete! You now have your core data pipeline.")
 
-generate_transfer_targets()
+# generate_transfer_targets()
+
+@st.cache_data(ttl=3600) # Caches the pipeline for 1 hour
+def run_core_pipeline():
+    fpl_data = fetch_core_fpl_data()
+    if fpl_data:
+        process_and_save(fpl_data)
+        print("Phase 1 Complete! You now have your core data pipeline.")
+    generate_transfer_targets()
+
+# # Call the cached function
+# with st.spinner("Initializing FPL Database..."):
+#     run_core_pipeline()
 
 # --- 1. CACHED DATA LOADING ---
 @st.cache_data
@@ -731,6 +745,42 @@ def generate_free_hit(targets_df, budget):
 #                 st.dataframe(fh_bench[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
 
 # --- 3. UI LAYOUT & INTERFACE ---
+
+# 🌟 NEW: THE DATABASE SECURITY GATE 🌟
+st.sidebar.header("🗄️ Database Status")
+
+files_needed = ['fpl_players.csv', 'fpl_transfer_targets.csv', 'fpl_gameweeks.csv']
+missing_files = [f for f in files_needed if not os.path.exists(f)]
+
+if missing_files:
+    st.sidebar.error("❌ Local Database Empty")
+    st.sidebar.caption("The FPL data files are missing. Click below to initialize the app.")
+    
+    # Big primary button for new users
+    if st.sidebar.button("⬇️ Download FPL Data Now", type="primary"):
+        with st.spinner("Fetching latest FPL data (this takes about 10-15 seconds)..."):
+            run_core_pipeline()
+            st.rerun() # Automatically reloads the page once files are created
+            
+    # Stop the app from running the rest of the code and crashing
+    st.stop() 
+else:
+    # Files exist! Tell the user how fresh the data is.
+    mod_time = os.path.getmtime('fpl_players.csv')
+    dt = datetime.fromtimestamp(mod_time)
+    st.sidebar.success(f"✅ Data Active (Updated: {dt.strftime('%b %d, %H:%M')})")
+    
+    # Give them a manual override to fetch fresh data before the Gameweek deadline
+    if st.sidebar.button("🔄 Force Update Database"):
+        run_core_pipeline.clear() # Clears the Streamlit cache to force a fresh pull
+        with st.spinner("Updating FPL data..."):
+            run_core_pipeline()
+            # Clear the cached CSV loader so it reads the new files
+            st.cache_data.clear() 
+            st.rerun()
+
+st.sidebar.divider() # Visual separator before Manager Settings
+
 players_df, targets_df, gw_df = load_csv_data()
 
 if players_df is not None:
@@ -758,6 +808,7 @@ if players_df is not None:
         st.session_state.available_chips = []
         st.session_state.gw = 1
         st.session_state.smart_targets_df = targets_df # <--- ADD THIS LINE
+        st.session_state.active_manager_id = None # <-- ADD THIS LINE
 
     # if analyze_button and manager_id_input.isdigit():
     #     manager_id = int(manager_id_input)
@@ -788,6 +839,7 @@ if players_df is not None:
     #         st.session_state.my_team = my_team_temp
 
     if analyze_button and manager_id_input.isdigit():
+        st.session_state.active_manager_id = manager_id_input
         manager_id = int(manager_id_input)
         gw = get_current_gameweek(gw_df)
         st.session_state.gw = gw
@@ -828,6 +880,8 @@ if players_df is not None:
 
     # --- TAB 1: TEAM ANALYSIS ---
     with tab1:
+        if st.session_state.get("active_manager_id") != manager_id_input and st.session_state.my_team is not None:
+            st.warning("⚠️ Manager ID changed! Please click 'Analyze My Team' in the sidebar to update your data.")
         if my_team is not None:
             st.success("✅ Data & Financials fetched successfully!")
             c1, c2, c3 = st.columns(3)
@@ -970,6 +1024,8 @@ if players_df is not None:
 
     # --- TAB 5: NEW FIXTURES & CHIP STRATEGY ---
     with tab5:
+        if st.session_state.get("active_manager_id") != manager_id_input and st.session_state.my_team is not None:
+            st.warning("⚠️ Manager ID changed! Please click 'Analyze My Team' in the sidebar to update your data.")
         st.header("📅 Rest-of-Season Fixtures & Chip Planner")
         if my_team is not None:
             col_chips, col_sched = st.columns([1, 2])
@@ -1013,11 +1069,15 @@ if players_df is not None:
 
     # --- TAB 2: MASTER TARGETS ---
     with tab2:
+        if st.session_state.get("active_manager_id") != manager_id_input and st.session_state.my_team is not None:
+            st.warning("⚠️ Manager ID changed! Please click 'Analyze My Team' in the sidebar to update your data.")
         st.header("🎯 Master Transfer Targets")
         st.dataframe(targets_df, use_container_width=True, hide_index=True)
 
     # --- TAB 3: SMART WILDCARD ---
     with tab3:
+        if st.session_state.get("active_manager_id") != manager_id_input and st.session_state.my_team is not None:
+            st.warning("⚠️ Manager ID changed! Please click 'Analyze My Team' in the sidebar to update your data.")
         st.header("🃏 Smart Wildcard Generator")
         selected_budget = st.slider("Set Wildcard Budget (£m)", min_value=90.0, max_value=110.0, value=float(sale_value), step=0.1)
         
@@ -1052,27 +1112,55 @@ if players_df is not None:
 
     # --- TAB 4: FREE HIT ENGINE ---
     with tab4:
+        if st.session_state.get("active_manager_id") != manager_id_input and st.session_state.my_team is not None:
+            st.warning("⚠️ Manager ID changed! Please click 'Analyze My Team' in the sidebar to update your data.")
         st.header("🔥 1-Week Free Hit Engine")
         fh_budget = st.slider("Set Free Hit Budget (£m)", min_value=90.0, max_value=110.0, value=float(sale_value), step=0.1, key="fh_budget")
         
+        # if st.button("Generate Free Hit Squad"):
+        #     with st.spinner("Optimizing purely for the upcoming Gameweek..."):
+        #         clean_targets = targets_df.dropna(subset=['now_cost', 'ep_next']).copy()
+        #         clean_targets = clean_targets[clean_targets['ep_next'].astype(float) > 0.5]
+                
+        #         fh_team = generate_free_hit(clean_targets, fh_budget)
+        #         fh_starters, fh_bench = optimize_starting_lineup(fh_team)
+                
+        #         total_fh_cost = round(fh_team['now_cost'].sum(), 1)
+        #         total_fh_ep = round(fh_team['ep_next'].sum(), 2)
+                
+        #         colA, colB = st.columns(2)
+        #         colA.metric("Total Squad Cost", f"£{total_fh_cost}m")
+        #         colB.metric("Total Squad Expected Points", f"{total_fh_ep} pts")
+                
+        #         st.subheader("📋 Optimal Free Hit Starting XI & Bench")
+        #         st.markdown("**Starting 11 (Sorted by 1-Week Potential)**")
+        #         st.dataframe(fh_starters[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
+                
+        #         st.markdown("**Auto-Subs Bench**")
+        #         st.dataframe(fh_bench[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
         if st.button("Generate Free Hit Squad"):
-            with st.spinner("Optimizing purely for the upcoming Gameweek..."):
-                clean_targets = targets_df.dropna(subset=['now_cost', 'ep_next']).copy()
-                clean_targets = clean_targets[clean_targets['ep_next'].astype(float) > 0.5]
-                
-                fh_team = generate_free_hit(clean_targets, fh_budget)
-                fh_starters, fh_bench = optimize_starting_lineup(fh_team)
-                
-                total_fh_cost = round(fh_team['now_cost'].sum(), 1)
-                total_fh_ep = round(fh_team['ep_next'].sum(), 2)
-                
-                colA, colB = st.columns(2)
-                colA.metric("Total Squad Cost", f"£{total_fh_cost}m")
-                colB.metric("Total Squad Expected Points", f"{total_fh_ep} pts")
-                
-                st.subheader("📋 Optimal Free Hit Starting XI & Bench")
-                st.markdown("**Starting 11 (Sorted by 1-Week Potential)**")
-                st.dataframe(fh_starters[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
-                
-                st.markdown("**Auto-Subs Bench**")
-                st.dataframe(fh_bench[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
+            if st.session_state.my_team is None:
+                st.warning("⚠️ Please Analyze your team first!")
+            else:
+                with st.spinner("Optimizing purely for the upcoming Gameweek..."):
+                    # CRITICAL: We use the raw targets_df here, NOT smart_targets_df
+                    # We only care about FPL's native 1-week expected points (ep_next)
+                    clean_targets = targets_df.dropna(subset=['now_cost', 'ep_next']).copy()
+                    clean_targets = clean_targets[clean_targets['ep_next'].astype(float) > 0.5]
+                    
+                    fh_team = generate_free_hit(clean_targets, fh_budget)
+                    fh_starters, fh_bench = optimize_starting_lineup(fh_team)
+                    
+                    total_fh_cost = round(fh_team['now_cost'].sum(), 1)
+                    total_fh_ep = round(fh_team['ep_next'].sum(), 2)
+                    
+                    colA, colB = st.columns(2)
+                    colA.metric("Total Squad Cost", f"£{total_fh_cost}m")
+                    colB.metric("Total Expected Points (1 Week)", f"{total_fh_ep} pts")
+                    
+                    st.subheader("📋 Optimal Free Hit Starting XI & Bench")
+                    st.markdown("**Starting 11 (Sorted by 1-Week Potential)**")
+                    st.dataframe(fh_starters[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
+                    
+                    st.markdown("**Auto-Subs Bench**")
+                    st.dataframe(fh_bench[['Role', 'Position', 'web_name', 'ep_next']], use_container_width=True, hide_index=True)
